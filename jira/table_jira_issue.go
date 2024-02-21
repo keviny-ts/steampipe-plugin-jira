@@ -16,8 +16,29 @@ import (
 	"github.com/turbot/steampipe-plugin-sdk/v5/plugin/transform"
 
 	"github.com/trivago/tgo/tcontainer"
+	"github.com/turbot/steampipe-plugin-jira/join_cache"
 	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
 )
+
+//// CACHE
+
+var tableKeyStruct = []join_cache.KeyStruct{
+	{
+		Name:              "jira_issue",
+		Pk:                "key",
+		Fk:                []join_cache.ForeignKeyStruct{},
+		BulkDataPullByIds: bulkDataPullByIds,
+	},
+}
+
+var cacheExpiration = 10 * time.Minute
+var cleanupInterval = 10 * time.Minute
+var batchSize = 500
+var idFormatter = func(id string) string {
+	return fmt.Sprintf("'%s'", id)
+}
+
+var cacheUtil = join_cache.NewCacheUtil(tableKeyStruct, cacheExpiration, cleanupInterval, batchSize, idFormatter)
 
 //// TABLE DEFINITION
 
@@ -416,6 +437,23 @@ func listIssues(ctx context.Context, d *plugin.QueryData, _ *plugin.HydrateData)
 					"sprint": getFieldKey(ctx, d, names, "Sprint"),
 				}
 			}
+
+			temp := map[string]interface{}{}
+			for _, column := range d.QueryContext.Columns {
+				columnValue, err := issueColumnToValue(ctx, column, &issue)
+				if err != nil {
+					return nil, err
+				}
+				// TODO doesnt work for interfaces like epic :|
+				if stringColumnValue, ok := columnValue.(string); ok && sensitivity != "sensitive" {
+					temp[column] = strings.ToLower(stringColumnValue)
+				} else {
+					temp[column] = columnValue
+				}
+			}
+			// TODO: add keys to cache too?
+			cacheUtil.AddIdsToForeignTableCache(ctx, "jira_issue", temp)
+			plugin.Logger(ctx).Debug("temp", temp)
 			d.StreamListItem(ctx, IssueInfo{issue, keys})
 
 			// Context may get cancelled due to manual cancellation or if the limit has been reached
@@ -439,12 +477,64 @@ func listIssues(ctx context.Context, d *plugin.QueryData, _ *plugin.HydrateData)
 
 //// HYDRATE FUNCTION
 
-func getIssue(ctx context.Context, d *plugin.QueryData, _ *plugin.HydrateData) (interface{}, error) {
+func bulkDataPullByIds(ctx context.Context, d *plugin.QueryData, h *plugin.HydrateData, ids []string) (*[]map[string]interface{}, error) {
+	startTime := time.Now()
+	defer measureTime(ctx, startTime, "bulkDataPullByIds")
+
+	jql := fmt.Sprintf("id in (%s)", strings.Join(ids, ","))
+	var limit int
+
+	// set different pagination limits based on search strategy
+	if shouldUseExpression(d) {
+		if maxResults, err := calculateMaxResults(ctx, d, jql); err != nil {
+			return nil, err
+		} else {
+			limit = maxResults
+		}
+	} else {
+		pageSize, err := getPageSize(ctx, d)
+		if err != nil {
+			plugin.Logger(ctx).Error("jira_issue.bulkDataPullByIds", "page_size", err)
+			return nil, err
+		}
+		limit = pageSize
+	}
+
+	options := jira.SearchOptions{
+		StartAt:    0,
+		MaxResults: limit,
+		Expand:     "names",
+	}
+
+	searchResult, _, err := searchJiraIssues(ctx, d, &options, jql)
+	if err != nil {
+		plugin.Logger(ctx).Error("jira_issue.bulkDataPullByIds", "search_error", err)
+		return nil, err
+	}
+
+	data := new([]map[string]interface{})
+	for _, issue := range searchResult.Issues {
+		temp := map[string]interface{}{}
+		for _, column := range d.QueryContext.Columns {
+			columnValue, err := issueColumnToValue(ctx, column, &issue)
+			if err != nil {
+				return nil, err
+			}
+			temp[column] = columnValue
+		}
+		*data = append(*data, temp)
+	}
+
+	return data, nil
+}
+
+func getIssue(ctx context.Context, d *plugin.QueryData, h *plugin.HydrateData) (interface{}, error) {
 	logger := plugin.Logger(ctx)
 	logger.Debug("getIssue")
 
 	issueId := d.EqualsQualString("id")
 	key := d.EqualsQualString("key")
+	parent_key := d.EqualsQualString("parent_key")
 
 	client, err := connect(ctx, d)
 	if err != nil {
@@ -455,10 +545,31 @@ func getIssue(ctx context.Context, d *plugin.QueryData, _ *plugin.HydrateData) (
 	var id string
 	if issueId != "" {
 		id = issueId
+		plugin.Logger(ctx).Debug("getting issueid", id)
 	} else if key != "" {
 		id = key
+		plugin.Logger(ctx).Debug("getting key", id)
+	} else if parent_key != "" {
+		id = parent_key
+		plugin.Logger(ctx).Debug("getting parent_key", id)
 	} else {
 		return nil, nil
+	}
+
+	cachedIssue, err := cacheUtil.GetRecordByIdAndBuildCache(ctx, d, h, "jira_issue", id)
+	if cachedIssue != nil {
+		plugin.Logger(ctx).Debug("cissue", cachedIssue)
+		if columnMapping, ok := cachedIssue.(map[string]interface{}); ok {
+			issue, _ := constructJiraIssue(ctx, columnMapping)
+			plugin.Logger(ctx).Debug("constructed issue", issue)
+			plugin.Logger(ctx).Debug("constructed issue Fields", issue.Fields)
+			plugin.Logger(ctx).Debug("constructed issue Fields Status", issue.Fields.Status)
+			keys := map[string]string{}
+			return IssueInfo{issue, keys}, nil
+		}
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	issue, res, err := client.Issue.Get(id, &jira.GetQueryOptions{
@@ -684,6 +795,138 @@ func getIssueComponents(ctx context.Context, d *transform.TransformData) (interf
 }
 
 // // Utility Function
+func measureTime(ctx context.Context, start time.Time, functionName string) {
+	plugin.Logger(ctx).Debug(fmt.Sprintf("Function %s took %s\n", functionName, time.Since(start)))
+}
+
+func constructJiraIssue(ctx context.Context, values map[string]interface{}) (jira.Issue, error) {
+	issue := jira.Issue{Fields: &jira.IssueFields{}}
+	for key, value := range values {
+		switch key {
+		case "id":
+			if ret, ok := value.(string); ok {
+				issue.ID = ret
+			}
+		case "key":
+			if ret, ok := value.(string); ok {
+				issue.Key = ret
+			}
+		case "self":
+			if ret, ok := value.(string); ok {
+				issue.Self = ret
+			}
+		case "project_key":
+			if ret, ok := value.(string); ok {
+				issue.Fields.Project.Key = ret
+			}
+		case "project_id":
+			if ret, ok := value.(string); ok {
+				issue.Fields.Project.ID = ret
+			}
+		case "status":
+			if ret, ok := value.(string); ok {
+				issue.Fields.Status.Name = ret
+			}
+		case "status_category":
+			if ret, ok := value.(string); ok {
+				issue.Fields.Status.StatusCategory.Name = ret
+			}
+		default:
+			// TODO implement
+		}
+		// TODO implement rest
+	}
+	return issue, nil
+}
+
+func issueColumnToValue(ctx context.Context, column string, issue *jira.Issue) (interface{}, error) {
+	unknowns := issue.Fields.Unknowns
+	switch column {
+	case "id":
+		return issue.ID, nil
+	case "key":
+		return issue.Key, nil
+	case "self":
+		return issue.Self, nil
+	case "project_key": // TODO test if project is nil
+		return issue.Fields.Project.Key, nil
+	case "project_id":
+		return issue.Fields.Project.ID, nil
+	case "status":
+		return issue.Fields.Status.Name, nil
+	case "status_category":
+		return issue.Fields.Status.StatusCategory.Name, nil
+	case "epic_key":
+		return issue.Fields.Epic.Key, nil
+	case "parent_key":
+		return issue.Fields.Parent.Key, nil
+	case "parent_issue_type":
+		if value, ok := unknowns[column]; ok {
+			return value, nil
+		}
+		return nil, errors.New("parent_issue_type not found")
+	case "parent_status":
+		if value, ok := unknowns[column]; ok {
+			return value, nil
+		}
+		return nil, errors.New("parent_status not found")
+	case "parent_status_category":
+		if value, ok := unknowns[column]; ok {
+			return value, nil
+		}
+		return nil, errors.New("parent_status_category not found")
+		// sprint_ids
+		// sprint_name
+	case "assignee_account_id":
+		return issue.Fields.Assignee.AccountID, nil
+	case "assignee_display_name":
+		return issue.Fields.Assignee.Name, nil
+	case "creator_account_id":
+		return issue.Fields.Creator.AccountID, nil
+	case "creator_display_name":
+		return issue.Fields.Creator.Name, nil
+	case "created":
+		return issue.Fields.Created, nil
+	case "duedate":
+		return issue.Fields.Duedate, nil
+	case "description":
+		return issue.Fields.Description, nil
+	case "type":
+		return issue.Fields.Type, nil
+	case "priority":
+		return issue.Fields.Priority, nil
+	case "project_name":
+		return issue.Fields.Project.Name, nil
+	case "reporter_account_id":
+		return issue.Fields.Reporter.AccountID, nil
+	case "reporter_display_name":
+		return issue.Fields.Reporter.DisplayName, nil
+	case "resolution_date":
+		return issue.Fields.Resolutiondate, nil
+	case "summary":
+		return issue.Fields.Summary, nil
+	case "updated":
+		return issue.Fields.Updated, nil
+	case "labels":
+		return issue.Fields.Labels, nil
+	case "component":
+		return issue.Fields.Components, nil
+	case "components":
+		return issue.Fields.Components, nil
+	case "fields":
+		return issue.Fields, nil
+	case "tags": // TODO check
+		return issue.Fields.Labels, nil
+	case "title":
+		return issue.Key, nil
+	default:
+		if value, ok := unknowns["custom_fields"].(map[string]interface{})[column]; ok {
+			return value, nil
+		}
+		plugin.Logger(ctx).Debug(fmt.Sprintf("Column %s is not a custom field", column))
+		return nil, errors.New(fmt.Sprintf("Column not supported: %s", column))
+	}
+}
 
 // wrapper function which handles searching for jira issues with the optimal method
 func searchJiraIssues(ctx context.Context, d *plugin.QueryData, options *jira.SearchOptions, jql string) (*searchResult, *jira.Response, error) {

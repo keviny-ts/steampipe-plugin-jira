@@ -5,6 +5,8 @@ go 1.21
 require (
 	github.com/andygrunwald/go-jira v1.16.0
 	github.com/andygrunwald/go-jira/v2 v2.0.0-20230325080157-2e11dffbdb9a
+	github.com/patrickmn/go-cache v2.1.0+incompatible
+	github.com/trivago/tgo v1.0.7
 	github.com/turbot/steampipe-plugin-sdk/v5 v5.6.2
 )
 
@@ -83,7 +85,6 @@ require (
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/stevenle/topsort v0.2.0 // indirect
 	github.com/tkrajina/go-reflector v0.5.6 // indirect
-	github.com/trivago/tgo v1.0.7 // indirect
 	github.com/turbot/go-kit v0.8.0-rc.0 // indirect
 	github.com/ulikunitz/xz v0.5.10 // indirect
 	github.com/zclconf/go-cty v1.14.0 // indirect
