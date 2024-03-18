@@ -23,6 +23,7 @@ type jiraConfig struct {
 	RefreshToken        *string `hcl:"refresh_token"`
 	RefreshUri          *string `hcl:"refresh_uri"`
 	AuthMode            *string `hcl:"auth_mode"`
+	CustomFields        *string `hcl:"custom_fields"`
 }
 
 func ConfigInstance() interface{} {
