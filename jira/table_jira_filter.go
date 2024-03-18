@@ -130,12 +130,11 @@ func searchForFilters(ctx context.Context, d *plugin.QueryData, startAt int, max
 	filters := new(filterSearchResult)
 
 	res, err := client.Do(req, filters)
-	body, _ := io.ReadAll(res.Body)
-	plugin.Logger(ctx).Debug("jira_filter.searchForFilters", "res_body", string(body))
-
 	if err != nil {
 		plugin.Logger(ctx).Error("jira_filter.searchForFilters", "api_error", err)
-		return nil, err
+		body, _ := io.ReadAll(res.Body)
+		newErr := fmt.Errorf("%s:%s", res.Status, string(body))
+		return nil, jira.NewJiraError(res, newErr)
 	}
 	return filters, nil
 }
@@ -167,15 +166,14 @@ func getFilter(ctx context.Context, d *plugin.QueryData, h *plugin.HydrateData) 
 	result := new(filterSearchResult)
 
 	res, err := client.Do(req, result)
-	body, _ := io.ReadAll(res.Body)
-	plugin.Logger(ctx).Debug("jira_filter.getFilter", "res_body", string(body))
-
 	if err != nil {
 		if isNotFoundError(err) {
 			return nil, nil
 		}
 		plugin.Logger(ctx).Error("jira_filter.getFilter", "api_error", err)
-		return nil, err
+		body, _ := io.ReadAll(res.Body)
+		newErr := fmt.Errorf("%s:%s", res.Status, string(body))
+		return nil, jira.NewJiraError(res, newErr)
 	}
 
 	return result, nil

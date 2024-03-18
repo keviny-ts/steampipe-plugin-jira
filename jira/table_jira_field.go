@@ -2,6 +2,7 @@ package jira
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/andygrunwald/go-jira"
@@ -92,12 +93,11 @@ func listFields(ctx context.Context, d *plugin.QueryData, _ *plugin.HydrateData)
 	fields := new([]jira.Field)
 
 	res, err := client.Do(req, fields)
-	body, _ := io.ReadAll(res.Body)
-	plugin.Logger(ctx).Debug("jira_field.listFields", "res_body", string(body))
-
 	if err != nil {
 		plugin.Logger(ctx).Error("jira_field.listFields", "api_error", err)
-		return nil, err
+		body, _ := io.ReadAll(res.Body)
+		newErr := fmt.Errorf("%s:%s", res.Status, string(body))
+		return nil, jira.NewJiraError(res, newErr)
 	}
 
 	for _, priority := range *fields {
