@@ -2,8 +2,10 @@ package jira
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strings"
 	"time"
@@ -238,62 +240,22 @@ func buildJQLQueryFromQuals(ctx context.Context, equalQuals plugin.KeyColumnQual
 }
 
 func getRequiredCustomField() map[string]map[string]interface{} {
-	/*
-		cusotmFieldMapFile := "/tmp/customFieldMap.json"
-		jsonFile, err := os.Open(cusotmFieldMapFile)
-		// if we os.Open returns an error then handle it
-		result := make(map[string]map[string]interface{})
-		if err != nil {
-			return result
-		}
+	steampipe_home := os.Getenv("STEAMPIPE_HOME")
+	cusotmFieldMapFile := steampipe_home + "/config/jira/custom_field.json"
+	result := make(map[string]map[string]interface{})
+	jsonFile, err := os.Open(cusotmFieldMapFile)
+
+	if err == nil {
 		// defer the closing of our jsonFile so that we can parse it later on
 		defer jsonFile.Close()
-
 		byteValue, _ := ioutil.ReadAll(jsonFile)
-
-		json.Unmarshal([]byte(byteValue), &result)
-
-		return result
-	*/
-	customFieldMap := map[string]map[string]interface{}{
-		"Eng Target Version/s": {
-			"key":        "customfield_13193",
-			"name":       "Eng Target Version/s",
-			"searchable": true,
-			"type":       "array",
-		},
-		"Release Commit": {
-			"key":        "customfield_13139",
-			"name":       "Release Commit",
-			"searchable": true,
-			"type":       "option",
-		},
-		"V-team/P-team": {
-			"key":        "customfield_13323",
-			"name":       "V-team/P-team",
-			"searchable": true,
-			"type":       "option-with-child",
-		},
-		"Found-In Version": {
-			"key":        "customfield_13149",
-			"name":       "Found-In Version",
-			"searchable": true,
-			"type":       "option-with-child",
-		},
-		"sprint": {
-			"key":        "customfield_10007",
-			"name":       "Sprint",
-			"searchable": true,
-			"type":       "array",
-		},
-		"epic": {
-			"key":        "customfield_10300",
-			"name":       "Epic Link",
-			"searchable": true,
-			"type":       "any",
-		},
+		var response []map[string]interface{}
+		json.Unmarshal([]byte(byteValue), &response)
+		for _, item := range response {
+			result[item["name"].(string)] = item
+		}
 	}
-	return customFieldMap
+	return result
 }
 
 func getIssueJQLKey(columnName string) string {
