@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -248,11 +248,14 @@ func getRequiredCustomField() map[string]map[string]interface{} {
 	if err == nil {
 		// defer the closing of our jsonFile so that we can parse it later on
 		defer jsonFile.Close()
-		byteValue, _ := ioutil.ReadAll(jsonFile)
+		byteValue, _ := io.ReadAll(jsonFile)
 		var response []map[string]interface{}
-		json.Unmarshal([]byte(byteValue), &response)
-		for _, item := range response {
-			result[item["name"].(string)] = item
+
+		jerr := json.Unmarshal([]byte(byteValue), &response)
+		if jerr == nil {
+			for _, item := range response {
+				result[item["name"].(string)] = item
+			}
 		}
 	}
 	return result
