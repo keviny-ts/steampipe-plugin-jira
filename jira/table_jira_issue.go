@@ -288,7 +288,8 @@ func tableIssue(ctx context.Context) *plugin.Table {
 	customFieldMap := getRequiredCustomField()
 
 	for key, customField := range customFieldMap {
-		if fieldType, ok := customField["type"].(string); ok {
+		if fieldSchema, ok := customField["schema"].(map[string]interface{}); ok {
+			fieldType := fieldSchema["type"].(string)
 			newColumn := &plugin.Column{
 				Name:        key,
 				Description: customField["name"].(string),
@@ -308,15 +309,17 @@ func tableIssue(ctx context.Context) *plugin.Table {
 				issueTable.Columns = append(issueTable.Columns, newColumn)
 			} else {
 				plugin.Logger(ctx).Error("jira_issue::tableIssue", "Unknown custom field type", fieldType, key, customField["name"])
+				continue
+			}
+			if searchable, ok := customField["searchable"].(bool); ok && searchable {
+				issueTable.List.KeyColumns = append(issueTable.List.KeyColumns, &plugin.KeyColumn{
+					Name:      key,
+					Require:   plugin.Optional,
+					Operators: []string{"=", "<>"},
+				})
 			}
 		}
-		if searchable, ok := customField["searchable"].(bool); ok && searchable {
-			issueTable.List.KeyColumns = append(issueTable.List.KeyColumns, &plugin.KeyColumn{
-				Name:      key,
-				Require:   plugin.Optional,
-				Operators: []string{"=", "<>"},
-			})
-		}
+
 	}
 
 	return issueTable
